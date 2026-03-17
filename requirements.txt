@@ -1,0 +1,9 @@
+requests==2.31.0
+python-dotenv==1.0.0
+
+# Broker-specific dependencies
+# Zerodha (Kite Connect) - install if using Zerodha
+kiteconnect>=4.1.0
+
+# Angel One (SmartAPI) - install if using Angel One
+smartapi-python>=1.3.0

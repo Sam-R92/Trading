@@ -1,0 +1,4 @@
+# FusionTrade Lite - Minimal Requirements
+# Only essential packages needed
+
+requests>=2.31.0
