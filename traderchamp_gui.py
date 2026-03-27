@@ -8,10 +8,11 @@ ENABLE_LOGGING = False  # Set to True to enable file logging (impacts performanc
 ENABLE_DEBUG_PRINTS = False  # Set to True to enable debug print statements
 
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import threading
 from datetime import datetime, timedelta
 from traderchamp import Traderchamp
+from bot_agent import TradingBot, CandlestickPatternDetector, ChartPatternMatcher, VWAPStrategyEngine
 from typing import Optional
 import os
 import sys
@@ -243,6 +244,9 @@ class FusionTradeGUI:
             # Strategy Templates
             self.templates = {}
             self.templates_file = Path(app_dir) / "config" / "templates.json"
+            
+            # Bot Agent
+            self.trading_bot = TradingBot(trader=self.trader, gui=self)
             
             # Trace callbacks removed - order value now shown in confirmation dialog
             
@@ -3036,6 +3040,12 @@ Settings → Configure Brokers
         notebook.add(analytics_tab, text='📈 PERFORMANCE ANALYTICS')
         
         self.create_performance_analytics_panel(analytics_tab)
+
+        # Tab 8: Bot Agent
+        bot_tab = tk.Frame(notebook, bg='#1e1e1e')
+        notebook.add(bot_tab, text='🤖 BOT AGENT')
+
+        self.create_bot_agent_panel(bot_tab)
     
     def create_performance_analytics_panel(self, parent):
         """Create comprehensive performance analytics dashboard."""
@@ -3171,6 +3181,630 @@ Settings → Configure Brokers
         # Initial load
         self.refresh_performance_analytics()
     
+    # ─── Bot Agent Panel & Methods ───────────────────────────────────────────
+
+    def create_bot_agent_panel(self, parent):
+        """Create the Bot Agent tab with pattern detection, image training, and auto-trade controls."""
+        # Main scrollable container
+        canvas = tk.Canvas(parent, bg='#1e1e1e', highlightthickness=0)
+        scrollbar = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg='#1e1e1e')
+
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # ── Header ──
+        header = tk.Frame(scroll_frame, bg='#1a1a1a', pady=10)
+        header.pack(fill='x', padx=10, pady=(10, 5))
+
+        tk.Label(header, text="🤖 Bot Agent - Automated Pattern Trading",
+                 font=('Arial', 16, 'bold'), bg='#1a1a1a', fg='#00d4ff').pack(side=tk.LEFT, padx=10)
+
+        self.bot_status_label = tk.Label(header, text="⏹ STOPPED", font=('Arial', 12, 'bold'),
+                                         bg='#1a1a1a', fg='#ff4444')
+        self.bot_status_label.pack(side=tk.RIGHT, padx=10)
+
+        # ── Control Buttons ──
+        ctrl_frame = tk.Frame(scroll_frame, bg='#2d2d2d', pady=8)
+        ctrl_frame.pack(fill='x', padx=10, pady=5)
+
+        self.bot_start_btn = tk.Button(ctrl_frame, text="▶ START BOT",
+                                        command=self.bot_start,
+                                        bg='#00cc00', fg='#000000',
+                                        font=('Arial', 11, 'bold'), width=14, height=2)
+        self.bot_start_btn.pack(side=tk.LEFT, padx=5)
+
+        self.bot_stop_btn = tk.Button(ctrl_frame, text="⏹ STOP BOT",
+                                       command=self.bot_stop,
+                                       bg='#ff0000', fg='#ffffff',
+                                       font=('Arial', 11, 'bold'), width=14, height=2,
+                                       state=tk.DISABLED)
+        self.bot_stop_btn.pack(side=tk.LEFT, padx=5)
+
+        self.bot_pause_btn = tk.Button(ctrl_frame, text="⏸ PAUSE",
+                                        command=self.bot_pause_resume,
+                                        bg='#ffaa00', fg='#000000',
+                                        font=('Arial', 11, 'bold'), width=14, height=2,
+                                        state=tk.DISABLED)
+        self.bot_pause_btn.pack(side=tk.LEFT, padx=5)
+
+        tk.Button(ctrl_frame, text="🔍 MANUAL SCAN",
+                  command=self.bot_manual_scan,
+                  bg='#0099ff', fg='#ffffff',
+                  font=('Arial', 11, 'bold'), width=14, height=2).pack(side=tk.LEFT, padx=5)
+
+        # ── Configuration ──
+        config_frame = tk.LabelFrame(scroll_frame, text="⚙️ Configuration",
+                                      bg='#2d2d2d', fg='#00d4ff',
+                                      font=('Arial', 11, 'bold'))
+        config_frame.pack(fill='x', padx=10, pady=5)
+
+        # Row 1: Symbol, Interval, Max Trades
+        row1 = tk.Frame(config_frame, bg='#2d2d2d')
+        row1.pack(fill='x', padx=10, pady=5)
+
+        tk.Label(row1, text="Symbol:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_symbol = tk.StringVar(value="NIFTY")
+        for sym in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+            tk.Radiobutton(row1, text=sym, variable=self.bot_symbol, value=sym,
+                           bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
+                           font=('Arial', 9)).pack(side=tk.LEFT, padx=3)
+
+        tk.Label(row1, text="   Scan Interval (s):", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_interval = tk.IntVar(value=60)
+        tk.Entry(row1, textvariable=self.bot_interval, width=6, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
+        tk.Label(row1, text="   Max Trades/Day:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_max_trades = tk.IntVar(value=5)
+        tk.Entry(row1, textvariable=self.bot_max_trades, width=4, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
+        # Row 2: Lots, SL%, Auto-execute, Market hours
+        row2 = tk.Frame(config_frame, bg='#2d2d2d')
+        row2.pack(fill='x', padx=10, pady=5)
+
+        tk.Label(row2, text="Lots:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_lots = tk.IntVar(value=1)
+        tk.Entry(row2, textvariable=self.bot_lots, width=4, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
+        tk.Label(row2, text="   Auto SL%:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_sl_percent = tk.DoubleVar(value=5.0)
+        tk.Entry(row2, textvariable=self.bot_sl_percent, width=6, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
+        tk.Label(row2, text="   Min Confidence%:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_min_confidence = tk.IntVar(value=70)
+        tk.Entry(row2, textvariable=self.bot_min_confidence, width=4, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
+        self.bot_auto_execute = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2, text="Auto-Execute Orders", variable=self.bot_auto_execute,
+                        bg='#2d2d2d', fg='#ff6600', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=15)
+
+        self.bot_market_hours = tk.BooleanVar(value=True)
+        tk.Checkbutton(row2, text="Market Hours Only", variable=self.bot_market_hours,
+                        bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
+                        font=('Arial', 9)).pack(side=tk.LEFT, padx=5)
+
+        # ── Pattern Selection ──
+        patterns_frame = tk.LabelFrame(scroll_frame, text="📊 Pattern Filters",
+                                        bg='#2d2d2d', fg='#ffaa00',
+                                        font=('Arial', 11, 'bold'))
+        patterns_frame.pack(fill='x', padx=10, pady=5)
+
+        # Candlestick patterns toggle
+        candle_header = tk.Frame(patterns_frame, bg='#2d2d2d')
+        candle_header.pack(fill='x', padx=10, pady=(5, 0))
+
+        self.bot_candle_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(candle_header, text="🕯️ Candlestick Patterns",
+                        variable=self.bot_candle_enabled,
+                        bg='#2d2d2d', fg='#00ff00', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+
+        # Candlestick pattern checkboxes (two columns)
+        candle_grid = tk.Frame(patterns_frame, bg='#2d2d2d')
+        candle_grid.pack(fill='x', padx=20, pady=5)
+
+        self.bot_candle_vars = {}
+        all_candle = CandlestickPatternDetector.ALL_PATTERNS
+        mid = len(all_candle) // 2 + 1
+        for i, pattern in enumerate(all_candle):
+            var = tk.BooleanVar(value=True)
+            self.bot_candle_vars[pattern] = var
+            col = 0 if i < mid else 1
+            row_idx = i if i < mid else i - mid
+            display_name = pattern.replace('_', ' ').title()
+            cb = tk.Checkbutton(candle_grid, text=display_name, variable=var,
+                                bg='#2d2d2d', fg='#cccccc', selectcolor='#1e1e1e',
+                                font=('Arial', 9))
+            cb.grid(row=row_idx, column=col, sticky='w', padx=10)
+
+        # Chart patterns toggle
+        chart_header = tk.Frame(patterns_frame, bg='#2d2d2d')
+        chart_header.pack(fill='x', padx=10, pady=(10, 0))
+
+        self.bot_chart_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(chart_header, text="📈 Chart Patterns (Image-Based Matching)",
+                        variable=self.bot_chart_enabled,
+                        bg='#2d2d2d', fg='#00ff00', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+
+        chart_grid = tk.Frame(patterns_frame, bg='#2d2d2d')
+        chart_grid.pack(fill='x', padx=20, pady=5)
+
+        self.bot_chart_vars = {}
+        chart_patterns = list(ChartPatternMatcher().builtin_patterns.keys())
+        mid_c = len(chart_patterns) // 2 + 1
+        for i, pattern in enumerate(chart_patterns):
+            var = tk.BooleanVar(value=True)
+            self.bot_chart_vars[pattern] = var
+            col = 0 if i < mid_c else 1
+            row_idx = i if i < mid_c else i - mid_c
+            display_name = pattern.replace('_', ' ').title()
+            cb = tk.Checkbutton(chart_grid, text=display_name, variable=var,
+                                bg='#2d2d2d', fg='#cccccc', selectcolor='#1e1e1e',
+                                font=('Arial', 9))
+            cb.grid(row=row_idx, column=col, sticky='w', padx=10)
+
+        # ── Additional Filters ──
+        filters_frame = tk.LabelFrame(scroll_frame, text="🔧 Additional Filters",
+                                       bg='#2d2d2d', fg='#00aaff',
+                                       font=('Arial', 11, 'bold'))
+        filters_frame.pack(fill='x', padx=10, pady=5)
+
+        filter_row = tk.Frame(filters_frame, bg='#2d2d2d')
+        filter_row.pack(fill='x', padx=10, pady=5)
+
+        self.bot_rsi_filter = tk.BooleanVar(value=True)
+        tk.Checkbutton(filter_row, text="RSI Filter", variable=self.bot_rsi_filter,
+                        bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
+                        font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(filter_row, text="OB:", bg='#2d2d2d', fg='#aaa',
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+        self.bot_rsi_ob = tk.IntVar(value=70)
+        tk.Entry(filter_row, textvariable=self.bot_rsi_ob, width=4,
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+
+        tk.Label(filter_row, text="OS:", bg='#2d2d2d', fg='#aaa',
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+        self.bot_rsi_os = tk.IntVar(value=30)
+        tk.Entry(filter_row, textvariable=self.bot_rsi_os, width=4,
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
+
+        self.bot_trend_filter = tk.BooleanVar(value=True)
+        tk.Checkbutton(filter_row, text="Trend Alignment (MA20)",
+                        variable=self.bot_trend_filter,
+                        bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
+                        font=('Arial', 10)).pack(side=tk.LEFT, padx=15)
+
+        # ── VWAP / VWMA Strategy Section ──
+        vwap_frame = tk.LabelFrame(scroll_frame, text="📐 VWAP / VWMA Strategies",
+                                    bg='#2d2d2d', fg='#ff00ff',
+                                    font=('Arial', 11, 'bold'))
+        vwap_frame.pack(fill='x', padx=10, pady=5)
+
+        # Strategy 1: VWAP Rejection Short
+        s1_frame = tk.Frame(vwap_frame, bg='#2d2d2d')
+        s1_frame.pack(fill='x', padx=10, pady=5)
+
+        self.bot_vwap_s1_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(s1_frame, text="S1: VWAP Rejection Short",
+                        variable=self.bot_vwap_s1_enabled,
+                        bg='#2d2d2d', fg='#ff9900', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+
+        tk.Label(s1_frame, text="  (Open < VWAP → cross above → fall below → rejection candle → PE)",
+                 bg='#2d2d2d', fg='#999999', font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+
+        self.bot_vwap_s1_state = tk.Label(s1_frame, text="State: --",
+                                           bg='#2d2d2d', fg='#aaaaaa',
+                                           font=('Courier', 9))
+        self.bot_vwap_s1_state.pack(side=tk.RIGHT, padx=10)
+
+        # Strategy 2: Pullback Failure Short
+        s2_frame = tk.Frame(vwap_frame, bg='#2d2d2d')
+        s2_frame.pack(fill='x', padx=10, pady=5)
+
+        self.bot_vwap_s2_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(s2_frame, text="S2: Pullback Failure Short",
+                        variable=self.bot_vwap_s2_enabled,
+                        bg='#2d2d2d', fg='#ff9900', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+
+        tk.Label(s2_frame, text="  (Below VWAP → bottom → pullback → VWMA failure → PE)",
+                 bg='#2d2d2d', fg='#999999', font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+
+        self.bot_vwap_s2_state = tk.Label(s2_frame, text="State: --",
+                                           bg='#2d2d2d', fg='#aaaaaa',
+                                           font=('Courier', 9))
+        self.bot_vwap_s2_state.pack(side=tk.RIGHT, padx=10)
+
+        # VWAP Auto-execute + description
+        vwap_opt_row = tk.Frame(vwap_frame, bg='#2d2d2d')
+        vwap_opt_row.pack(fill='x', padx=10, pady=(0, 5))
+
+        self.bot_vwap_auto_exec = tk.BooleanVar(value=False)
+        tk.Checkbutton(vwap_opt_row, text="Auto-Execute VWAP Trades",
+                        variable=self.bot_vwap_auto_exec,
+                        bg='#2d2d2d', fg='#ff6600', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+
+        tk.Label(vwap_opt_row,
+                 text="   Target: below day low  |  Uses 1-min & 3-min VWMA for failure detection",
+                 bg='#2d2d2d', fg='#888888', font=('Arial', 8)).pack(side=tk.LEFT, padx=10)
+
+        # Strategy logic description
+        desc_frame = tk.Frame(vwap_frame, bg='#1a1a1a')
+        desc_frame.pack(fill='x', padx=10, pady=(0, 10))
+
+        desc_text = (
+            "S1 VWAP Rejection: Price opens below VWAP & VWMA → crosses above VWAP → "
+            "falls back below → wait for rejection candle (high stays below VWAP) → ENTER PE on close\n"
+            "S2 Pullback Failure: Price below VWAP hits bottom → pullback up (ALERT) → "
+            "check 1-min / 3-min / mid VWMA failure candle → ENTER PE, target below day low\n"
+            "If no failure candle within 5 candles → skip entry"
+        )
+        tk.Label(desc_frame, text=desc_text, bg='#1a1a1a', fg='#777777',
+                 font=('Arial', 8), justify=tk.LEFT, wraplength=700).pack(padx=10, pady=5, anchor='w')
+
+        # ── Reference Image Training ──
+        image_frame = tk.LabelFrame(scroll_frame, text="🖼️ Reference Image Training",
+                                     bg='#2d2d2d', fg='#ff9900',
+                                     font=('Arial', 11, 'bold'))
+        image_frame.pack(fill='x', padx=10, pady=5)
+
+        img_row1 = tk.Frame(image_frame, bg='#2d2d2d')
+        img_row1.pack(fill='x', padx=10, pady=5)
+
+        tk.Button(img_row1, text="📁 Add Reference Image",
+                  command=self.bot_add_reference_image,
+                  bg='#ff9900', fg='#000000',
+                  font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(img_row1, text="Upload chart screenshots to train pattern recognition",
+                 bg='#2d2d2d', fg='#aaaaaa', font=('Arial', 9)).pack(side=tk.LEFT, padx=10)
+
+        # Reference patterns list
+        self.bot_ref_listbox = tk.Listbox(image_frame, height=4, bg='#1e1e1e', fg='#ffffff',
+                                           selectbackground='#00ff00', selectforeground='#000000',
+                                           font=('Courier', 9))
+        self.bot_ref_listbox.pack(fill='x', padx=10, pady=5)
+
+        tk.Button(image_frame, text="🗑️ Remove Selected",
+                  command=self.bot_remove_reference,
+                  bg='#ff4444', fg='#ffffff',
+                  font=('Arial', 9, 'bold')).pack(anchor='w', padx=10, pady=(0, 5))
+
+        # ── Live Detection Results ──
+        detection_frame = tk.LabelFrame(scroll_frame, text="📡 Live Pattern Detection",
+                                         bg='#2d2d2d', fg='#00ff00',
+                                         font=('Arial', 11, 'bold'))
+        detection_frame.pack(fill='x', padx=10, pady=5)
+
+        det_cols = ('Time', 'Type', 'Pattern', 'Signal', 'Strength', 'Description')
+        self.bot_detection_tree = ttk.Treeview(detection_frame, columns=det_cols,
+                                                show='headings', height=6)
+        for col in det_cols:
+            self.bot_detection_tree.heading(col, text=col)
+            w = 100 if col not in ('Description', 'Pattern') else 200
+            self.bot_detection_tree.column(col, width=w)
+
+        self.bot_detection_tree.tag_configure('buy', foreground='#00ff00')
+        self.bot_detection_tree.tag_configure('sell', foreground='#ff4444')
+        self.bot_detection_tree.tag_configure('neutral', foreground='#ffaa00')
+
+        det_scroll = ttk.Scrollbar(detection_frame, orient=tk.VERTICAL,
+                                    command=self.bot_detection_tree.yview)
+        self.bot_detection_tree.configure(yscrollcommand=det_scroll.set)
+        self.bot_detection_tree.pack(side=tk.LEFT, fill='both', expand=True, padx=(10, 0), pady=5)
+        det_scroll.pack(side=tk.RIGHT, fill='y', padx=(0, 10), pady=5)
+
+        # ── Activity Log ──
+        log_frame = tk.LabelFrame(scroll_frame, text="📋 Bot Activity Log",
+                                   bg='#2d2d2d', fg='#ffffff',
+                                   font=('Arial', 11, 'bold'))
+        log_frame.pack(fill='both', expand=True, padx=10, pady=(5, 10))
+
+        self.bot_log_text = tk.Text(log_frame, height=10, bg='#0d0d0d', fg='#00ff00',
+                                     font=('Courier', 9), wrap=tk.WORD, state=tk.DISABLED)
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL,
+                                    command=self.bot_log_text.yview)
+        self.bot_log_text.configure(yscrollcommand=log_scroll.set)
+        self.bot_log_text.pack(side=tk.LEFT, fill='both', expand=True, padx=(10, 0), pady=5)
+        log_scroll.pack(side=tk.RIGHT, fill='y', padx=(0, 10), pady=5)
+
+        # Tag colours for log
+        self.bot_log_text.tag_configure('info', foreground='#00ff00')
+        self.bot_log_text.tag_configure('warning', foreground='#ffaa00')
+        self.bot_log_text.tag_configure('error', foreground='#ff4444')
+        self.bot_log_text.tag_configure('signal', foreground='#00d4ff')
+        self.bot_log_text.tag_configure('trade', foreground='#ff00ff')
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Load existing reference patterns into listbox
+        self._bot_refresh_references()
+
+    # ── Bot control methods ──────────────────────────────────────────────────
+
+    def _bot_sync_config(self):
+        """Sync GUI variables to the trading bot config."""
+        bot = self.trading_bot
+        bot.config['symbol'] = self.bot_symbol.get()
+        bot.config['scan_interval'] = max(10, self.bot_interval.get())
+        bot.config['max_trades_per_day'] = max(1, self.bot_max_trades.get())
+        bot.config['lots'] = max(1, self.bot_lots.get())
+        bot.config['auto_sl_percent'] = max(0.5, self.bot_sl_percent.get())
+        bot.config['min_confidence'] = max(10, self.bot_min_confidence.get())
+        bot.config['auto_execute'] = self.bot_auto_execute.get()
+        bot.config['market_hours_only'] = self.bot_market_hours.get()
+        bot.config['candlestick_patterns_enabled'] = self.bot_candle_enabled.get()
+        bot.config['chart_patterns_enabled'] = self.bot_chart_enabled.get()
+        bot.config['rsi_filter_enabled'] = self.bot_rsi_filter.get()
+        bot.config['rsi_overbought'] = self.bot_rsi_ob.get()
+        bot.config['rsi_oversold'] = self.bot_rsi_os.get()
+        bot.config['trend_filter_enabled'] = self.bot_trend_filter.get()
+
+        # VWAP strategy settings
+        bot.config['vwap_rejection_enabled'] = self.bot_vwap_s1_enabled.get()
+        bot.config['pullback_failure_enabled'] = self.bot_vwap_s2_enabled.get()
+        bot.config['vwap_auto_execute'] = self.bot_vwap_auto_exec.get()
+
+        # Enabled patterns
+        bot.config['enabled_candlestick_patterns'] = [
+            p for p, v in self.bot_candle_vars.items() if v.get()
+        ]
+        bot.config['enabled_chart_patterns'] = [
+            p for p, v in self.bot_chart_vars.items() if v.get()
+        ]
+
+        bot.save_config()
+
+    def bot_start(self):
+        """Start the trading bot."""
+        if self.trading_bot.is_running:
+            return
+
+        # Warn if auto-execute is on
+        if self.bot_auto_execute.get():
+            if not messagebox.askyesno(
+                "⚠️ Auto-Execute Enabled",
+                "The bot will AUTOMATICALLY PLACE ORDERS when patterns are detected.\n\n"
+                "Are you sure you want to start?"
+            ):
+                return
+
+        self._bot_sync_config()
+
+        # Wire up callbacks
+        self.trading_bot.on_log = self._bot_on_log
+        self.trading_bot.on_signal = self._bot_on_signal
+        self.trading_bot.on_trade = self._bot_on_trade
+        self.trading_bot.on_vwap_alert = self._bot_on_vwap_alert
+
+        self.trading_bot.start()
+
+        # Start VWAP state refresh timer
+        self._bot_refresh_vwap_state()
+
+        self.bot_start_btn.config(state=tk.DISABLED)
+        self.bot_stop_btn.config(state=tk.NORMAL)
+        self.bot_pause_btn.config(state=tk.NORMAL)
+        self.bot_status_label.config(text="▶ RUNNING", fg='#00ff00')
+
+    def bot_stop(self):
+        """Stop the trading bot."""
+        self.trading_bot.stop()
+
+        self.bot_start_btn.config(state=tk.NORMAL)
+        self.bot_stop_btn.config(state=tk.DISABLED)
+        self.bot_pause_btn.config(state=tk.DISABLED)
+        self.bot_status_label.config(text="⏹ STOPPED", fg='#ff4444')
+
+    def bot_pause_resume(self):
+        """Toggle pause/resume."""
+        if self.trading_bot.is_paused:
+            self.trading_bot.resume()
+            self.bot_pause_btn.config(text="⏸ PAUSE")
+            self.bot_status_label.config(text="▶ RUNNING", fg='#00ff00')
+        else:
+            self.trading_bot.pause()
+            self.bot_pause_btn.config(text="▶ RESUME")
+            self.bot_status_label.config(text="⏸ PAUSED", fg='#ffaa00')
+
+    def bot_manual_scan(self):
+        """Run a manual pattern scan in a background thread."""
+        self._bot_sync_config()
+        self._bot_append_log("🔍 Running manual scan...", 'info')
+        threading.Thread(target=self._bot_manual_scan_async, daemon=True).start()
+
+    def _bot_manual_scan_async(self):
+        """Execute manual scan off the UI thread."""
+        try:
+            results = self.trading_bot.manual_scan()
+            self.root.after(0, lambda: self._bot_display_detections(results))
+            if results:
+                self.root.after(0, lambda: self._bot_append_log(
+                    f"✅ Scan complete: {len(results)} pattern(s) found", 'signal'))
+            else:
+                self.root.after(0, lambda: self._bot_append_log(
+                    "ℹ️ Scan complete: No patterns detected", 'info'))
+        except Exception as e:
+            self.root.after(0, lambda: self._bot_append_log(f"❌ Scan error: {e}", 'error'))
+
+    def _bot_on_log(self, message, level):
+        """Callback from bot thread → schedule UI update."""
+        self.root.after(0, lambda: self._bot_append_log(message, level))
+
+    def _bot_on_signal(self, signal):
+        """Callback when bot detects a pattern signal."""
+        self.root.after(0, lambda: self._bot_display_detections(
+            self.trading_bot.detected_patterns))
+
+    def _bot_on_vwap_alert(self, alert):
+        """Callback when VWAP strategy issues an alert."""
+        msg = alert.get('message', 'VWAP Alert')
+        self.root.after(0, lambda: self._bot_append_log(msg, 'signal'))
+        # Show a popup notification for important alerts
+        self.root.after(0, lambda: messagebox.showinfo(
+            "🔔 VWAP Strategy Alert", msg))
+
+    def _bot_refresh_vwap_state(self):
+        """Periodically update VWAP strategy state labels in the GUI."""
+        if not self.trading_bot.is_running:
+            return
+        try:
+            state = self.trading_bot.vwap_engine.get_state_summary()
+            s1_text = state['s1_state'].replace('_', ' ').title()
+            s2_text = state['s2_state'].replace('_', ' ').title()
+
+            s1_color = '#00ff00' if 'signal' in state['s1_state'] else '#ffaa00' if 'waiting_rejection' in state['s1_state'] else '#aaaaaa'
+            s2_color = '#00ff00' if 'signal' in state['s2_state'] else '#ffaa00' if 'checking' in state['s2_state'] else '#aaaaaa'
+
+            self.bot_vwap_s1_state.config(text=f"State: {s1_text}", fg=s1_color)
+            self.bot_vwap_s2_state.config(text=f"State: {s2_text}", fg=s2_color)
+        except Exception:
+            pass
+        # Refresh every 5 seconds while running
+        if self.trading_bot.is_running:
+            self.root.after(5000, self._bot_refresh_vwap_state)
+
+    def _bot_on_trade(self, trade_info):
+        """Callback when bot executes a trade."""
+        msg = (f"🚀 TRADE: BUY {trade_info['symbol']} {trade_info['strike']} "
+               f"{trade_info['opt_type']} x{trade_info['lots']} | "
+               f"Pattern: {trade_info['pattern']}")
+        self.root.after(0, lambda: self._bot_append_log(msg, 'trade'))
+        # Refresh positions after trade
+        self.root.after(3000, self.refresh_positions)
+
+    def _bot_append_log(self, message, level='info'):
+        """Append a message to the bot activity log widget."""
+        self.bot_log_text.config(state=tk.NORMAL)
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        tag = level if level in ('info', 'warning', 'error', 'signal', 'trade') else 'info'
+        self.bot_log_text.insert(tk.END, f"[{timestamp}] {message}\n", tag)
+        self.bot_log_text.see(tk.END)
+        self.bot_log_text.config(state=tk.DISABLED)
+
+    def _bot_display_detections(self, patterns):
+        """Update the detection results treeview."""
+        for item in self.bot_detection_tree.get_children():
+            self.bot_detection_tree.delete(item)
+
+        now = datetime.now().strftime('%H:%M:%S')
+        for p in patterns:
+            signal = p.get('signal', 'NEUTRAL')
+            tag = 'buy' if signal == 'BUY' else 'sell' if signal == 'SELL' else 'neutral'
+            self.bot_detection_tree.insert('', tk.END, values=(
+                now,
+                p.get('type', 'candlestick'),
+                p.get('pattern', '').replace('_', ' ').title(),
+                signal,
+                f"{p.get('strength', 0)}%",
+                p.get('description', '')
+            ), tags=(tag,))
+
+    def bot_add_reference_image(self):
+        """Open file dialog to add a reference chart image."""
+        file_path = filedialog.askopenfilename(
+            title="Select Reference Chart Image",
+            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                       ("All Files", "*.*")]
+        )
+        if not file_path:
+            return
+
+        # Ask for pattern details
+        detail_win = tk.Toplevel(self.root)
+        detail_win.title("Pattern Details")
+        detail_win.geometry("400x250")
+        detail_win.configure(bg='#2d2d2d')
+        detail_win.transient(self.root)
+
+        tk.Label(detail_win, text="Pattern Name:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(pady=(15, 2))
+        name_var = tk.StringVar()
+        tk.Entry(detail_win, textvariable=name_var, width=30,
+                 font=('Arial', 10)).pack(pady=2)
+
+        tk.Label(detail_win, text="Signal:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(pady=(10, 2))
+        signal_var = tk.StringVar(value="BUY")
+        sig_frame = tk.Frame(detail_win, bg='#2d2d2d')
+        sig_frame.pack()
+        tk.Radiobutton(sig_frame, text="BUY", variable=signal_var, value="BUY",
+                        bg='#2d2d2d', fg='#00ff00', selectcolor='#1e1e1e').pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(sig_frame, text="SELL", variable=signal_var, value="SELL",
+                        bg='#2d2d2d', fg='#ff4444', selectcolor='#1e1e1e').pack(side=tk.LEFT, padx=10)
+
+        tk.Label(detail_win, text="Description:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(pady=(10, 2))
+        desc_var = tk.StringVar()
+        tk.Entry(detail_win, textvariable=desc_var, width=30,
+                 font=('Arial', 10)).pack(pady=2)
+
+        def _save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Warning", "Please enter a pattern name")
+                return
+            success = self.trading_bot.add_reference_image(
+                image_path=file_path,
+                name=name,
+                signal=signal_var.get(),
+                description=desc_var.get().strip()
+            )
+            if success:
+                self._bot_append_log(f"✅ Reference image added: {name}", 'info')
+                self._bot_refresh_references()
+                detail_win.destroy()
+            else:
+                messagebox.showerror("Error",
+                                     "Failed to extract pattern from image.\n"
+                                     "Install Pillow (pip install Pillow) for image support.")
+
+        tk.Button(detail_win, text="💾 Save Pattern", command=_save,
+                  bg='#00cc00', fg='#000000',
+                  font=('Arial', 10, 'bold')).pack(pady=15)
+
+    def bot_remove_reference(self):
+        """Remove selected reference pattern."""
+        sel = self.bot_ref_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        patterns = self.trading_bot.chart_matcher.user_patterns
+        if 0 <= idx < len(patterns):
+            removed = patterns.pop(idx)
+            # Re-save
+            import json as _json
+            pf = os.path.join(self.trading_bot.chart_matcher.reference_dir, "user_patterns.json")
+            with open(pf, 'w') as f:
+                _json.dump(patterns, f, indent=2)
+            self._bot_append_log(f"🗑️ Removed pattern: {removed.get('name', '')}", 'info')
+            self._bot_refresh_references()
+
+    def _bot_refresh_references(self):
+        """Refresh the reference patterns listbox."""
+        self.bot_ref_listbox.delete(0, tk.END)
+        for p in self.trading_bot.chart_matcher.user_patterns:
+            self.bot_ref_listbox.insert(tk.END,
+                                         f"[{p.get('signal', '?')}] {p.get('name', 'Unknown')} - {p.get('description', '')}")
+
     def adjust_sl_percent(self, delta):
         """Adjust stop loss percentage and apply immediately if positions exist."""
         current = self.sl_percent.get()
