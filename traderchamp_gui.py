@@ -3296,6 +3296,37 @@ Settings → Configure Brokers
                         bg='#2d2d2d', fg='#ffffff', selectcolor='#1e1e1e',
                         font=('Arial', 9)).pack(side=tk.LEFT, padx=5)
 
+        # Row 3: Target%, Trailing SL, Enable SL
+        row3 = tk.Frame(config_frame, bg='#2d2d2d')
+        row3.pack(fill='x', padx=10, pady=5)
+
+        self.bot_enable_sl = tk.BooleanVar(value=True)
+        tk.Checkbutton(row3, text="Enable Auto SL", variable=self.bot_enable_sl,
+                        bg='#2d2d2d', fg='#ff4444', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+
+        self.bot_enable_target = tk.BooleanVar(value=False)
+        tk.Checkbutton(row3, text="Enable Target", variable=self.bot_enable_target,
+                        bg='#2d2d2d', fg='#00ff88', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=10)
+
+        tk.Label(row3, text="Target%:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_target_percent = tk.DoubleVar(value=10.0)
+        tk.Entry(row3, textvariable=self.bot_target_percent, width=6, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
+        self.bot_enable_trailing = tk.BooleanVar(value=False)
+        tk.Checkbutton(row3, text="Trailing SL", variable=self.bot_enable_trailing,
+                        bg='#2d2d2d', fg='#ffaa00', selectcolor='#1e1e1e',
+                        font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=10)
+
+        tk.Label(row3, text="Trail%:", bg='#2d2d2d', fg='#ffffff',
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        self.bot_trail_percent = tk.DoubleVar(value=3.0)
+        tk.Entry(row3, textvariable=self.bot_trail_percent, width=6, justify='center',
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=3)
+
         # ── Pattern Selection ──
         patterns_frame = tk.LabelFrame(scroll_frame, text="📊 Pattern Filters",
                                         bg='#2d2d2d', fg='#ffaa00',
@@ -3548,6 +3579,11 @@ Settings → Configure Brokers
         bot.config['max_trades_per_day'] = max(1, self.bot_max_trades.get())
         bot.config['lots'] = max(1, self.bot_lots.get())
         bot.config['auto_sl_percent'] = max(0.5, self.bot_sl_percent.get())
+        bot.config['enable_sl'] = self.bot_enable_sl.get()
+        bot.config['enable_target'] = self.bot_enable_target.get()
+        bot.config['target_percent'] = max(0.5, self.bot_target_percent.get())
+        bot.config['enable_trailing_sl'] = self.bot_enable_trailing.get()
+        bot.config['trail_percent'] = max(0.5, self.bot_trail_percent.get())
         bot.config['min_confidence'] = max(10, self.bot_min_confidence.get())
         bot.config['auto_execute'] = self.bot_auto_execute.get()
         bot.config['market_hours_only'] = self.bot_market_hours.get()

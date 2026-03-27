@@ -711,12 +711,12 @@ class VWAPStrategyEngine:
         self.s2_bottom_idx = -1
         self.s2_pullback_high = 0.0
         self.s2_alert_sent = False
-        self.s2_failure_wait_count = 0    # candles waited for failure
+        self.s2_failure_start_time = None   # timestamp when failure-check window opened
 
         # Configuration
         self.vwma_1m_period = 1     # 1-candle VWMA (same as 1-min if 1-min candles)
         self.vwma_3m_period = 3     # 3-candle VWMA
-        self.max_failure_wait = 5   # max candles to wait for failure before skipping
+        self.failure_timeout_sec = 300  # 5-minute window to detect failure before skipping
 
         # Callbacks
         self.on_log = on_log
@@ -738,7 +738,7 @@ class VWAPStrategyEngine:
         self.s2_bottom_idx = -1
         self.s2_pullback_high = 0.0
         self.s2_alert_sent = False
-        self.s2_failure_wait_count = 0
+        self.s2_failure_start_time = None
 
     def evaluate(self, candles: List[CandleStick]) -> List[Dict]:
         """Run both strategies on the candle series.
@@ -937,10 +937,10 @@ class VWAPStrategyEngine:
             # Check if price has reached VWMA zone
             if cur_vwma1 is not None and last.close >= cur_vwma1 * 0.998:
                 self.s2_state = PullbackFailureState.CHECKING_FAILURE
-                self.s2_failure_wait_count = 0
+                self.s2_failure_start_time = datetime.now()
                 self._log(
                     f"🔍 S2: Price reached VWMA zone ({cur_vwma1:.2f}) – "
-                    f"checking for failure candle",
+                    f"checking for failure candle (5-min window)",
                     'signal'
                 )
 
@@ -953,34 +953,56 @@ class VWAPStrategyEngine:
             return None
 
         if self.s2_state == PullbackFailureState.CHECKING_FAILURE:
-            self.s2_failure_wait_count += 1
 
             # Calculate mid-VWMA level (between 1-min and 3-min VWMA)
             mid_vwma = (cur_vwma1 + cur_vwma3) / 2 if cur_vwma1 and cur_vwma3 else cur_vwap
 
             failure_detected = False
             failure_type = ""
+            failure_strength = 80
 
-            # Check 1: 1-min VWMA failure — price falls back below 1-min VWMA
+            # Check 1 (PRIMARY): 1-min VWMA failure — immediate entry + alert
             if cur_vwma1 is not None and prev.close >= cur_vwma1 and last.close < cur_vwma1:
                 failure_detected = True
                 failure_type = "1-min VWMA failure"
+                failure_strength = 90  # highest confidence
 
-            # Check 2: 3-min VWMA candle failure — price fails at 3-min VWMA level
+                # Fire alert popup for 1-min failure (primary signal)
+                if self.on_alert:
+                    try:
+                        self.on_alert({
+                            'type': 'VWMA_FAILURE',
+                            'title': '🔴 1-min VWMA Failure – ENTER PE',
+                            'message': (
+                                f"1-min VWMA failure confirmed!\n"
+                                f"Close: ₹{last.close:.2f}  |  VWMA1: ₹{cur_vwma1:.2f}\n"
+                                f"Bottom: ₹{self.s2_bottom_price:.2f}\n"
+                                f"Target: below day low ₹{day_low_val:.2f}"
+                            ),
+                            'strategy': 'S2',
+                            'failure_type': failure_type,
+                            'price': last.close,
+                        })
+                    except Exception:
+                        pass
+
+            # Check 2: 3-min VWMA candle failure (secondary — user may switch timeframe)
             elif (cur_vwma3 is not None
                   and last.high >= cur_vwma3 * 0.998
                   and last.close < cur_vwma3
                   and last.is_bearish):
                 failure_detected = True
                 failure_type = "3-min VWMA candle failure"
+                failure_strength = 75
 
-            # Check 3: Middle failure — price fails between 1 and 3 min VWMA
+            # Check 3: Mid failure (secondary — user may switch timeframe)
             elif (cur_vwma1 is not None and cur_vwma3 is not None
                   and last.high >= mid_vwma * 0.998
                   and last.close < mid_vwma
                   and last.is_bearish):
                 failure_detected = True
                 failure_type = "mid VWMA (1-3 min) failure"
+                failure_strength = 70
 
             if failure_detected:
                 self.s2_state = PullbackFailureState.SIGNAL_READY
@@ -993,7 +1015,7 @@ class VWAPStrategyEngine:
                 signal = {
                     'pattern': 'pullback_failure_short',
                     'signal': 'SELL',
-                    'strength': 80,
+                    'strength': failure_strength,
                     'type': 'vwap_strategy',
                     'description': (
                         f"Pullback Failure Short – Bottom at {self.s2_bottom_price:.2f}, "
@@ -1013,10 +1035,11 @@ class VWAPStrategyEngine:
                 self.s2_alert_sent = False
                 return signal
 
-            # If too many candles without failure → skip (no entry)
-            if self.s2_failure_wait_count >= self.max_failure_wait:
+            # If 5-minute window elapsed without failure → skip (no entry)
+            elapsed = (datetime.now() - self.s2_failure_start_time).total_seconds() if self.s2_failure_start_time else 0
+            if elapsed >= self.failure_timeout_sec:
                 self._log(
-                    f"⏭️ S2: No failure candle after {self.max_failure_wait} candles – skipping",
+                    f"⏭️ S2: No failure candle after 5 minutes – skipping",
                     'info'
                 )
                 self.s2_state = PullbackFailureState.WAITING_BELOW_VWAP
@@ -1046,7 +1069,8 @@ class VWAPStrategyEngine:
             's2_enabled': self.s2_enabled,
             's2_bottom': self.s2_bottom_price,
             's2_pullback_high': self.s2_pullback_high,
-            's2_failure_wait': self.s2_failure_wait_count,
+            's2_failure_elapsed': round((datetime.now() - self.s2_failure_start_time).total_seconds(), 1)
+                if self.s2_failure_start_time else 0,
         }
 
 
@@ -1079,6 +1103,11 @@ class TradingBot:
             'auto_execute': False,  # If False, just alerts. If True, places orders.
             'lots': 1,
             'auto_sl_percent': 5.0,
+            'enable_sl': True,
+            'enable_target': False,
+            'target_percent': 10.0,
+            'enable_trailing_sl': False,
+            'trail_percent': 3.0,
             'product_type': 'INTRADAY',
             'order_type': 'MARKET',
 
@@ -1131,6 +1160,12 @@ class TradingBot:
         self.on_log = None     # Callback for log messages: fn(message, level)
         self.on_trade = None   # Callback when trade executed: fn(trade_info)
         self.on_vwap_alert = None  # Callback for VWAP strategy alerts: fn(alert_dict)
+
+        # Trailing SL tracking: { instrument_key: { broker_key, client, instrument_key, quantity,
+        #   product, entry_price, highest_price, trail_percent, sl_order_id } }
+        self._trailing_positions: Dict[str, Dict] = {}
+        self._trailing_active = False
+        self._trailing_thread: Optional[threading.Thread] = None
 
         # Config persistence
         self._config_file = os.path.join(
@@ -1210,6 +1245,7 @@ class TradingBot:
         self._stop_event.set()
         self.is_running = False
         self.is_paused = False
+        self.stop_trailing_monitor()
 
         self._log("🛑 Bot Agent STOPPED", 'info')
 
@@ -1498,7 +1534,7 @@ class TradingBot:
         return 100.0 - (100.0 / (1.0 + rs))
 
     def _execute_signal(self, signal: Dict, last_candle: CandleStick):
-        """Execute a trade based on the detected signal."""
+        """Execute a trade based on the detected signal, then place SL / target / trailing orders."""
         # Cooldown check
         if self.last_trade_time:
             elapsed = (datetime.now() - self.last_trade_time).total_seconds()
@@ -1541,13 +1577,14 @@ class TradingBot:
                     break
 
             quantity = lots * lot_size
+            product_code = "I" if self.config['product_type'] == "INTRADAY" else "D"
 
             trade_info = {
                 'time': datetime.now().strftime('%H:%M:%S'),
                 'symbol': symbol,
                 'strike': atm_strike,
                 'opt_type': opt_type,
-                'direction': 'BUY',  # Always BUY the option
+                'direction': 'BUY',
                 'quantity': quantity,
                 'lots': lots,
                 'pattern': pattern,
@@ -1562,16 +1599,25 @@ class TradingBot:
                 'trade'
             )
 
-            # Use GUI's place_order_async for actual execution
-            product_code = "I" if self.config['product_type'] == "INTRADAY" else "D"
+            # Execute order and then place SL/target in same thread so we can
+            # get the entry price result synchronously.
+            def _place_and_protect():
+                try:
+                    entry_price = self._place_entry_order(
+                        symbol, expiry, str(atm_strike), opt_type, quantity,
+                        product_code
+                    )
+                    if entry_price and entry_price > 0:
+                        self._place_protection_orders(
+                            signal, symbol, expiry, str(atm_strike), opt_type,
+                            quantity, product_code, entry_price
+                        )
+                    else:
+                        self._log("Could not determine entry price - SL/target skipped", 'warning')
+                except Exception as e:
+                    self._log(f"Protection order error: {e}", 'error')
 
-            # Execute in background via GUI method
-            threading.Thread(
-                target=self.gui._place_order_async,
-                args=(symbol, expiry, str(atm_strike), opt_type, quantity,
-                      'BUY', self.config['order_type'], None, self.config['product_type']),
-                daemon=True
-            ).start()
+            threading.Thread(target=_place_and_protect, daemon=True).start()
 
             self.trades_today += 1
             self.last_trade_time = datetime.now()
@@ -1584,6 +1630,237 @@ class TradingBot:
 
         except Exception as e:
             self._log(f"Trade execution error: {e}", 'error')
+
+    # ── Order helpers ────────────────────────────────────────────────────────
+
+    def _place_entry_order(self, symbol, expiry, strike, opt_type, quantity,
+                           product_code) -> Optional[float]:
+        """Place the entry order via each active broker and return the entry price."""
+        entry_price = None
+        for broker_key, broker_info in self._iter_brokers():
+            try:
+                client = broker_info['client']
+                index_num = None
+                for key, info in self.trader.indices.items():
+                    if info['name'] == symbol:
+                        index_num = key
+                        break
+                instrument_key = self.trader.format_instrument_key_for_broker(
+                    broker_key, symbol, expiry, strike, opt_type,
+                    self.trader.indices[index_num]
+                )
+                if not instrument_key:
+                    self._log(f"Instrument not found for {broker_info['name']}", 'error')
+                    continue
+
+                result = client.place_order(
+                    instrument_key=instrument_key,
+                    quantity=quantity,
+                    transaction_type='BUY',
+                    order_type=self.config['order_type'],
+                    product=product_code
+                )
+
+                if result and entry_price is None:
+                    # Fetch LTP as entry price (market order)
+                    import time as _time
+                    _time.sleep(1)
+                    try:
+                        quote = client.get_market_quote(instrument_key)
+                        entry_price = float(
+                            quote.get('data', {}).get('ltp', 0)
+                            or quote.get('data', {}).get('last_price', 0)
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._log(f"Entry order error ({broker_info.get('name', '?')}): {e}", 'error')
+        return entry_price
+
+    def _iter_brokers(self):
+        """Yield (broker_key, broker_info) for all active brokers."""
+        if self.trader.multi_account_mode:
+            for key, info in self.trader.active_brokers.items():
+                yield key, info
+        else:
+            yield self.trader.current_broker, {
+                'client': self.trader.current_client,
+                'name': self.trader.account_name
+            }
+
+    def _place_protection_orders(self, signal, symbol, expiry, strike, opt_type,
+                                 quantity, product_code, entry_price):
+        """Place stop-loss and/or target orders after entry is filled."""
+        sl_percent = self.config.get('auto_sl_percent', 5.0)
+        target_percent = self.config.get('target_percent', 10.0)
+        enable_sl = self.config.get('enable_sl', True)
+        enable_target = self.config.get('enable_target', False)
+        enable_trailing = self.config.get('enable_trailing_sl', False)
+        trail_percent = self.config.get('trail_percent', 3.0)
+
+        # Use VWAP signal target if available (overrides percent-based)
+        signal_target = signal.get('target')  # e.g. day_low for S2
+
+        for broker_key, broker_info in self._iter_brokers():
+            try:
+                client = broker_info['client']
+                # Resolve instrument_key
+                index_num = None
+                for key, info in self.trader.indices.items():
+                    if info['name'] == symbol:
+                        index_num = key
+                        break
+                instrument_key = self.trader.format_instrument_key_for_broker(
+                    broker_key, symbol, expiry, strike, opt_type,
+                    self.trader.indices[index_num]
+                )
+                if not instrument_key:
+                    continue
+
+                # ── Stop-Loss order ──
+                if enable_sl and not enable_trailing:
+                    sl_price = round(entry_price * (1 - sl_percent / 100), 2)
+                    sl_trigger = round(sl_price + 0.05, 2)
+                    try:
+                        client.place_order(
+                            instrument_key=instrument_key,
+                            quantity=quantity,
+                            transaction_type='SELL',
+                            order_type='SL-M',
+                            product=product_code,
+                            price=sl_price,
+                            trigger_price=sl_trigger
+                        )
+                        self._log(
+                            f"🛡 SL placed @ ₹{sl_price} ({sl_percent}% below entry ₹{entry_price:.2f})",
+                            'info'
+                        )
+                    except Exception as e:
+                        self._log(f"SL order failed: {e}", 'error')
+
+                # ── Trailing SL (monitor-based, no broker SL order) ──
+                if enable_trailing:
+                    pos_key = f"{broker_key}_{instrument_key}"
+                    self._trailing_positions[pos_key] = {
+                        'broker_key': broker_key,
+                        'client': client,
+                        'instrument_key': instrument_key,
+                        'quantity': quantity,
+                        'product': product_code,
+                        'entry_price': entry_price,
+                        'highest_price': entry_price,
+                        'trail_percent': trail_percent,
+                        'current_sl': round(entry_price * (1 - trail_percent / 100), 2),
+                    }
+                    self._log(
+                        f"📈 Trailing SL activated @ ₹{self._trailing_positions[pos_key]['current_sl']} "
+                        f"({trail_percent}% trail from ₹{entry_price:.2f})",
+                        'info'
+                    )
+                    self._ensure_trailing_monitor()
+
+                # ── Target (profit booking) order ──
+                if enable_target:
+                    if signal_target and signal_target > 0:
+                        # VWAP strategy gives an absolute target (e.g. day_low)
+                        # For option BUY the target is a price at which to SELL
+                        # We approximate: option gained proportional to index drop
+                        target_price = round(entry_price * (1 + target_percent / 100), 2)
+                        self._log(
+                            f"🎯 Target (VWAP signal) @ ₹{target_price} "
+                            f"(index target {signal_target:.2f}, option +{target_percent}%)",
+                            'info'
+                        )
+                    else:
+                        target_price = round(entry_price * (1 + target_percent / 100), 2)
+                        self._log(
+                            f"🎯 Target @ ₹{target_price} (+{target_percent}% from ₹{entry_price:.2f})",
+                            'info'
+                        )
+                    try:
+                        client.place_order(
+                            instrument_key=instrument_key,
+                            quantity=quantity,
+                            transaction_type='SELL',
+                            order_type='LIMIT',
+                            product=product_code,
+                            price=target_price
+                        )
+                        self._log(f"✅ Target order placed @ ₹{target_price}", 'info')
+                    except Exception as e:
+                        self._log(f"Target order failed: {e}", 'error')
+
+            except Exception as e:
+                self._log(f"Protection order error ({broker_info.get('name', '?')}): {e}", 'error')
+
+    # ── Trailing Stop-Loss Monitor ───────────────────────────────────────────
+
+    def _ensure_trailing_monitor(self):
+        """Start the trailing SL background thread if not already running."""
+        if self._trailing_active:
+            return
+        self._trailing_active = True
+        self._trailing_thread = threading.Thread(target=self._trailing_monitor_loop, daemon=True)
+        self._trailing_thread.start()
+
+    def _trailing_monitor_loop(self):
+        """Poll LTP every 5 seconds and adjust trailing SL."""
+        import time as _time
+        self._log("Trailing SL monitor started", 'info')
+        while self._trailing_active and self.is_running:
+            if not self._trailing_positions:
+                break
+            for pos_key, pos in list(self._trailing_positions.items()):
+                try:
+                    client = pos['client']
+                    quote = client.get_market_quote(pos['instrument_key'])
+                    ltp = float(
+                        quote.get('data', {}).get('ltp', 0)
+                        or quote.get('data', {}).get('last_price', 0)
+                    )
+                    if ltp <= 0:
+                        continue
+
+                    # Update highest price & trailing SL
+                    if ltp > pos['highest_price']:
+                        pos['highest_price'] = ltp
+                        new_sl = round(ltp * (1 - pos['trail_percent'] / 100), 2)
+                        if new_sl > pos['current_sl']:
+                            pos['current_sl'] = new_sl
+                            self._log(
+                                f"📈 Trail SL updated: LTP ₹{ltp:.2f} → SL ₹{new_sl}",
+                                'info'
+                            )
+
+                    # Check if SL hit
+                    if ltp <= pos['current_sl']:
+                        self._log(
+                            f"🚨 Trailing SL HIT @ ₹{ltp:.2f} (SL ₹{pos['current_sl']})",
+                            'trade'
+                        )
+                        try:
+                            client.place_order(
+                                instrument_key=pos['instrument_key'],
+                                quantity=pos['quantity'],
+                                transaction_type='SELL',
+                                order_type='MARKET',
+                                product=pos['product']
+                            )
+                            self._log("✅ Trailing SL exit order placed", 'trade')
+                        except Exception as e:
+                            self._log(f"Trailing SL exit failed: {e}", 'error')
+                        del self._trailing_positions[pos_key]
+                except Exception as e:
+                    self._log(f"Trailing monitor error: {e}", 'error')
+            _time.sleep(5)
+
+        self._trailing_active = False
+        self._log("Trailing SL monitor stopped", 'info')
+
+    def stop_trailing_monitor(self):
+        """Stop the trailing SL monitor."""
+        self._trailing_active = False
+        self._trailing_positions.clear()
 
     def get_status(self) -> Dict:
         """Get current bot status."""
